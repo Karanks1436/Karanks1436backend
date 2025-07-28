@@ -1,47 +1,3 @@
-// const express = require("express");
-// const nodemailer = require("nodemailer");
-// const cors = require("cors");
-
-// const app = express();
-// app.use(cors());
-// app.use(express.json());
-
-// app.post("/send-login-email", async (req, res) => {
-//   const { name, email } = req.body;
-
-//   const transporter = nodemailer.createTransport({
-//     service: "gmail",
-//     auth: {
-//       user: "karanksxxx@gmail.com",
-//       pass: "vqla xjtv arnf ulpf", // App-specific password (not your real Gmail password)
-//     },
-//   });
-
-//   const mailOptions = {
-//     from: '"KARANKS1436 👾" <karanksxxx@gmail.com>',
-//     to: email,
-//     subject: "Login Successful - KARANKS1436",
-//     html: `
-//       <h2>Hello ${name},</h2>
-//       <p>You have logged in successfully at ${new Date().toLocaleString()}.</p>
-//       <p>Welcome back to <strong>KARANKS1436</strong>!</p>
-//     `,
-//   };
-
-//   try {
-//     await transporter.sendMail(mailOptions);
-//     res.status(200).json({ message: "Email sent successfully!" });
-//   } catch (error) {
-//     console.error("Email send error:", error);
-//     res.status(500).json({ error: "Failed to send email." });
-//   }
-// });
-
-// const PORT = 5000;
-// app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-
-
 const express = require("express");
 const nodemailer = require("nodemailer");
 const fs = require("fs");
@@ -149,6 +105,49 @@ app.post("/send-bulk-email", async (req, res) => {
     res.status(500).send({ success: false, message: "Failed to send emails" });
   }
 });
+// ------------------------------
+// 📧 Contact Form Email Endpoint
+// ------------------------------
+app.post("/send-contact-message", async (req, res) => {
+  const { name, email, message } = req.body;
 
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: "karanksxxx@gmail.com",
+      pass: "vqla xjtv arnf ulpf", // App password
+    },
+  });
+
+  if (!name || !email || !message) {
+    return res.status(400).json({ error: "All fields are required." });
+  }
+
+  const mailOptions = {
+    from: `"KaranKS1436 Contact Form" <karanksxxx@gmail.com>`,
+    to: "karanksxxx@gmail.com",
+    replyTo: email, // 👈 This makes replies go to the user's address
+    subject: `📨 New Contact Message from ${name}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; background: #111; color: #fff; padding: 20px; border-radius: 8px;">
+        <h2 style="color: #00e5ff;">New Contact Form Message</h2>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <hr style="border-color: #333;" />
+        <p style="margin-top: 16px;"><strong>Message:</strong></p>
+        <div style="background: #1c1c1c; padding: 12px; border-radius: 6px; color: #ddd;">${message}</div>
+        <p style="margin-top: 24px; font-size: 12px; color: #666;">Sent on: ${new Date().toLocaleString()}</p>
+      </div>
+    `,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    res.status(200).json({ success: true, message: "Message sent!" });
+  } catch (err) {
+    console.error("Contact message error:", err);
+    res.status(500).json({ success: false, message: "Failed to send contact message." });
+  }
+});
 const PORT = 5000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
