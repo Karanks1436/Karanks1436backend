@@ -1,182 +1,284 @@
+require("dotenv").config();
 const express = require("express");
 const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 const cors = require("cors");
-const { google } = require("googleapis");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const rateLimit = require("express-rate-limit");
+const { body, validationResult } = require("express-validator");
+const winston = require("winston");
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
-// ---------------------------------------
-// 🔑 Gmail OAuth2 Configuration
-// ---------------------------------------
-const CLIENT_ID = process.env.GMAIL_CLIENT_ID;
-const CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
-const REDIRECT_URI = "https://developers.google.com/oauthplayground";
-const REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN;
+// -------------------- ENV --------------------
+const PORT = process.env.PORT || 5000;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || SMTP_USER;
 
-const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
-oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
+const BULK_BATCH_SIZE = 40;
+const BULK_CONCURRENCY = 5;
+const SEND_RETRIES = 2;
+const SEND_RETRY_DELAY_MS = 500;
 
-// 🧩 Helper function to create transporter
-async function createTransporter() {
-  const accessToken = await oAuth2Client.getAccessToken();
-
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      type: "OAuth2",
-      user: "karanksxxx@gmail.com", // your Gmail address
-      clientId: CLIENT_ID,
-      clientSecret: CLIENT_SECRET,
-      refreshToken: REFRESH_TOKEN,
-      accessToken: accessToken.token,
-    },
-  });
+if (!SMTP_USER || !SMTP_PASS) {
+  console.error("ERROR: SMTP_USER and SMTP_PASS must be set.");
+  process.exit(1);
 }
 
-// ---------------------------------------
-// 📩 1️⃣ Send Login Email
-// ---------------------------------------
-app.post("/send-login-email", async (req, res) => {
-  const { name, email } = req.body;
+// -------------------- LOGGER --------------------
+const logger = winston.createLogger({
+  level: "info",
+  transports: [
+    new winston.transports.Console({ format: winston.format.simple() }),
+    new winston.transports.File({ filename: "combined.log" }),
+  ],
+});
 
-  try {
-    const transporter = await createTransporter();
+// -------------------- MIDDLEWARE --------------------
+app.use(helmet());
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+app.use(morgan("tiny"));
 
-    // Load HTML template
-    const templatePath = path.join(__dirname, "templates", "loginTemplate.html");
-    let htmlTemplate = fs.readFileSync(templatePath, "utf-8");
+// RATE LIMIT
+app.use(
+  rateLimit({
+    windowMs: 60000,
+    max: 60,
+  })
+);
 
-    // Replace placeholders
-    htmlTemplate = htmlTemplate
-      .replace(/{{user_name}}/g, name)
-      .replace(/{{login_time}}/g, new Date().toLocaleString());
+// -------------------- SMTP TRANSPORTER --------------------
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+  auth: { user: SMTP_USER, pass: SMTP_PASS },
+  pool: true,
+  maxConnections: 5,
+  maxMessages: 1000,
+});
 
-    const mailOptions = {
-      from: '"KARANKS1436 👾" <karanksxxx@gmail.com>',
-      to: email,
-      subject: `Welcome back, ${name}!`,
-      html: htmlTemplate,
-    };
-
-    await transporter.sendMail(mailOptions);
-    res.status(200).json({ message: "Email sent successfully!" });
-  } catch (error) {
-    console.error("OAuth2 Login Email Error:", error);
-    res.status(500).json({ error: "Failed to send login email." });
+transporter.verify((err) => {
+  if (err) {
+    logger.error("SMTP verify failed:", err);
+  } else {
+    logger.info("✅ SMTP ready");
   }
 });
 
-// ---------------------------------------
-// 📤 2️⃣ Send Bulk Emails
-// ---------------------------------------
-app.post("/send-bulk-email", async (req, res) => {
-  const { emails, message, fileUrl } = req.body;
-
+// -------------------- HELPERS --------------------
+function loadTemplate(name) {
   try {
-    const transporter = await createTransporter();
-
-    await Promise.all(
-      emails.map((to_email) => {
-        const html = `
-        <div style="max-width: 640px; margin: auto; font-family: 'Segoe UI', Roboto, sans-serif; background: linear-gradient(145deg, #1f1f22, #141416); color: #eaeaea; border-radius: 16px; padding: 28px; box-shadow: 0 0 20px rgba(0, 229, 255, 0.2); border: 1px solid #2b2b2e;">
-          <header style="text-align: center; border-bottom: 1px solid #333; padding-bottom: 20px; margin-bottom: 30px;">
-            <h2 style="color: #00e5ff; margin: 0; font-size: 26px;">🚀 Karanks1436 Notification</h2>
-            <p style="color: #aaa; font-size: 15px; margin-top: 8px;">You are receiving this as a valued member of <strong>Karanks1436</strong>.</p>
-          </header>
-
-          <section style="margin-bottom: 32px;">
-            <h3 style="color: #00ffc3; font-size: 18px; margin-bottom: 10px;">📝 Message:</h3>
-            <div style="background: #262628; padding: 18px 20px; border-left: 4px solid #00e5ff; border-radius: 10px; font-size: 16px; color: #f1f1f1; line-height: 1.6;">
-              ${message || "No message provided."}
-            </div>
-          </section>
-
-          ${fileUrl ? `
-            <section style="margin-bottom: 32px;">
-              <h3 style="color: #00ffc3; font-size: 18px; margin-bottom: 10px;">📎 Attached File / Image:</h3>
-              <a href="${fileUrl}" target="_blank" style="display: inline-block; color: #4fc3f7; font-size: 15px; word-break: break-all; margin-bottom: 12px;">🔗 ${fileUrl}</a>
-              <div style="margin-top: 16px; text-align: center;">
-                <img src="${fileUrl}" alt="Attachment" style="max-width: 100%; border-radius: 12px; box-shadow: 0 0 12px rgba(0,0,0,0.4);" />
-              </div>
-            </section>
-          ` : ""}
-
-          <footer style="border-top: 1px solid #333; padding-top: 20px; text-align: center; font-size: 13px; color: #888;">
-            <p>This notification was sent via the <strong>Karanks1436 Admin Panel</strong>.</p>
-            <p>© 2025 Karanks1436 • All rights reserved.</p>
-          </footer>
-        </div>
-        `;
-
-        return transporter.sendMail({
-          from: '"Karanks1436 👾" <karanksxxx@gmail.com>',
-          to: to_email,
-          subject: "🔔 Notification from Admin",
-          html,
-        });
-      })
-    );
-
-    res.status(200).send({ success: true, message: "Emails sent successfully!" });
+    return fs.readFileSync(path.join(__dirname, "templates", name), "utf8");
   } catch (err) {
-    console.error("Bulk Email Error:", err);
-    res.status(500).send({ success: false, message: "Failed to send bulk emails" });
+    return null;
   }
+}
+
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+// Retry mail sending
+async function sendWithRetries(options) {
+  let lastErr;
+  for (let attempt = 0; attempt <= SEND_RETRIES; attempt++) {
+    try {
+      return await transporter.sendMail(options);
+    } catch (err) {
+      lastErr = err;
+      await sleep(SEND_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+  throw lastErr;
+}
+
+// ✅ CUSTOM CONCURRENCY LIMITER (Better than p-limit)
+function createLimiter(concurrency) {
+  let running = 0;
+  const queue = [];
+
+  const run = () => {
+    if (running >= concurrency || queue.length === 0) return;
+
+    const item = queue.shift();
+    running++;
+
+    item
+      .fn()
+      .then(item.resolve)
+      .catch(item.reject)
+      .finally(() => {
+        running--;
+        run();
+      });
+  };
+
+  return function limit(fn) {
+    return new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      run();
+    });
+  };
+}
+
+// -------------------- ROUTES --------------------
+
+// ✅ HEALTH CHECK
+app.get("/health", (req, res) =>
+  res.json({ status: "ok", time: new Date().toISOString() })
+);
+
+// ✅ LOGIN EMAIL
+app.post(
+  "/send-login-email",
+  [body("name").isString(), body("email").isEmail()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty())
+      return res.status(400).json({ errors: errors.array() });
+
+    const { name, email } = req.body;
+
+    try {
+      let html = loadTemplate("loginTemplate.html");
+      if (html) {
+        html = html
+          .replace(/{{user_name}}/g, name)
+          .replace(/{{login_time}}/g, new Date().toLocaleString());
+      } else {
+        html = `<p>Hello ${name}, login at ${new Date().toLocaleString()}</p>`;
+      }
+
+      const info = await sendWithRetries({
+        from: `"Karanks1436" <${SMTP_USER}>`,
+        to: email,
+        subject: `Welcome back, ${name}!`,
+        html,
+      });
+
+      return res.json({ success: true, messageId: info.messageId });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ success: false, error: "Failed to send login email" });
+    }
+  }
+);
+
+// ✅ CONTACT MESSAGE
+app.post(
+  "/send-contact-message",
+  [body("name").isString(), body("email").isEmail(), body("message").isString()],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty())
+      return res.status(400).json({ errors: errors.array() });
+
+    const { name, email, message } = req.body;
+
+    try {
+      const info = await sendWithRetries({
+        from: `"Contact Form" <${SMTP_USER}>`,
+        to: ADMIN_EMAIL,
+        replyTo: email,
+        subject: `📨 New Contact Message from ${name}`,
+        html: `
+          <h2>New Message</h2>
+          <p><b>Name:</b> ${name}</p>
+          <p><b>Email:</b> ${email}</p>
+          <p>${message}</p>
+        `,
+      });
+
+      return res.json({ success: true, messageId: info.messageId });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ success: false, error: "Failed to send contact message" });
+    }
+  }
+);
+
+// ✅ BULK EMAIL
+app.post(
+  "/send-bulk-email",
+  [
+    body("emails").isArray({ min: 1 }),
+    body("emails.*").isEmail(),
+    body("message").optional().isString(),
+    body("subject").optional().isString(),
+    body("fileUrl").optional().isString(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty())
+      return res.status(400).json({ errors: errors.array() });
+
+    const { emails, message = "", subject = "🔔 Notification", fileUrl } =
+      req.body;
+
+    const limit = createLimiter(BULK_CONCURRENCY);
+    const batches = [];
+
+    for (let i = 0; i < emails.length; i += BULK_BATCH_SIZE) {
+      batches.push(emails.slice(i, i + BULK_BATCH_SIZE));
+    }
+
+    const results = [];
+
+    for (const batch of batches) {
+      const promises = batch.map((to) =>
+        limit(async () => {
+          try {
+            const html = `
+              <h3>🔔 Notification</h3>
+              <p>${message}</p>
+              ${
+                fileUrl
+                  ? `<p><a href="${fileUrl}" target="_blank">Attached File</a></p>`
+                  : ""
+              }
+            `;
+
+            const info = await sendWithRetries({
+              from: `"Karanks1436" <${SMTP_USER}>`,
+              to,
+              subject,
+              html,
+            });
+
+            return { to, success: true, messageId: info.messageId };
+          } catch (err) {
+            return { to, success: false, error: err.message };
+          }
+        })
+      );
+
+      const settled = await Promise.all(promises);
+      results.push(...settled);
+      await sleep(400);
+    }
+
+    const failed = results.filter((r) => !r.success);
+
+    return res.json({
+      success: failed.length === 0,
+      sent: results.length - failed.length,
+      failed: failed.length,
+      details: failed,
+    });
+  }
+);
+
+// -------------------- START SERVER --------------------
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
-
-// ---------------------------------------
-// 💌 3️⃣ Contact Form Email
-// ---------------------------------------
-app.post("/send-contact-message", async (req, res) => {
-  const { name, email, message } = req.body;
-
-  if (!name || !email || !message) {
-    return res.status(400).json({ error: "All fields are required." });
-  }
-
-  try {
-    const transporter = await createTransporter();
-
-    const mailOptions = {
-      from: `"KaranKS1436 Contact Form" <karanksxxx@gmail.com>`,
-      to: "karanksxxx@gmail.com",
-      replyTo: email,
-      subject: `📨 New Contact Message from ${name}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; background: #111; color: #fff; padding: 20px; border-radius: 8px;">
-          <h2 style="color: #00e5ff;">New Contact Form Message</h2>
-          <p><strong>Name:</strong> ${name}</p>
-          <p><strong>Email:</strong> ${email}</p>
-          <hr style="border-color: #333;" />
-          <p style="margin-top: 16px;"><strong>Message:</strong></p>
-          <div style="background: #1c1c1c; padding: 12px; border-radius: 6px; color: #ddd;">${message}</div>
-          <p style="margin-top: 24px; font-size: 12px; color: #666;">Sent on: ${new Date().toLocaleString()}</p>
-        </div>
-      `,
-    };
-
-    await transporter.sendMail(mailOptions);
-    res.status(200).json({ success: true, message: "Message sent!" });
-  } catch (err) {
-    console.error("Contact Message Error:", err);
-    res.status(500).json({ success: false, message: "Failed to send contact message." });
-  }
-});
-
-// ---------------------------------------
-// 🚀 Server Setup
-// ---------------------------------------
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
-
-
-
-
 
 
 
@@ -237,7 +339,7 @@ app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
 //     service: "gmail",
 //     auth: {
 //       user: "karanksxxx@gmail.com",
-//       pass: "vqla xjtv arnf ulpf",
+//       pass: "vqla xjtv arnf ulpf", 
 //     },
 //   });
 
