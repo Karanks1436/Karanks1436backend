@@ -129,6 +129,9 @@ app.get("/health", (req, res) =>
   res.json({ status: "ok", time: new Date().toISOString() })
 );
 
+app.get("/", (req, res) =>
+  res.send("Karanks1436 Backend is Live 🚀 Nodemailer Ready!")
+);
 // ✅ LOGIN EMAIL
 app.post(
   "/send-login-email",
